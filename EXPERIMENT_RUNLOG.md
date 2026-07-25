@@ -98,3 +98,40 @@ RAY_ADDRESS=127.0.0.1:6379 python -m unirl.train_diffusion \
   module paths (two self-inflicted kills during this campaign).
 
 🤖 Assembled with Claude Code; full narrative in `REPRO_NOTES_ZH.md`.
+
+## Appendix: verbatim launch commands
+
+All runs: `cd /scratch/unirl && source .venv-sglang/bin/activate`, fresh
+`ray start --head --port=6379 --num-gpus=<N> --object-store-memory=50000000000 --include-dashboard=false`,
+`export RAY_ADDRESS=127.0.0.1:6379 WANDB_API_KEY=... REPORT_TO_WANDB=true`.
+`P` = `++logging.project_name=unirl-qwen-image-miles-aligned`, `R` = `++logging.run_name=`.
+
+```bash
+# 1 v1 aligned (recipe was then attn-8 = *_v1_attn8.yaml)
+CUDA_VISIBLE_DEVICES=0,1,2,3 GPUS_PER_NODE=4 bash examples/run_experiment_single_node.sh \
+  diffusion/qwen_image/qwen_image_flowgrpo_miles_aligned ++devices_per_node=4
+# 2 v2 aligned (recipe as on this branch, 12 targets)
+#   same as #1 with WANDB_RUN_NAME=qwen_image_flowgrpo_miles_aligned_v2_mlp_lora
+# 3 control r1 (4 GPU, second ray cluster on GPUs 4-7, RAY_TMPDIR=/scratch/ray2, port 6390)
+python -m unirl.train_diffusion --config-name=diffusion/qwen_image/qwen_image_dancegrpo \
+  num_devices=4 ++devices_per_node=4 ++logging.report_to_wandb=true
+# 4 control r2 (8 GPU)
+python -m unirl.train_diffusion --config-name=diffusion/qwen_image/qwen_image_dancegrpo \
+  num_devices=8 ++logging.report_to_wandb=true ++rollout.forward_batch_size=8 ++stack.micro_batch_size=4
+# 5 cut +CFG4 short
+#   = #4 + $P ${R}bisect_stock_plus_cfg4 ++sampling.guidance_scale=4.0
+# 6 cut FlowSDE kernel
+python -m unirl.train_diffusion --config-name=diffusion/qwen_image/qwen_image_trainside \
+  num_devices=8 ++logging.report_to_wandb=true $P ${R}bisect_flowsde_kernel_eta07 \
+  ++rollout.forward_batch_size=8 ++stack.micro_batch_size=4
+# 7 cut eta 1.2         = #6 + ${R}bisect_flowsde_eta12 "++sampling.eta=1.2"
+# 8 cut SDE triple      = #7 + ${R}bisect_sde_triple "++sampling.sde_indices=[3,4]"
+# 9 cut triple+CFG4     = #8 + ${R}bisect_sde3_cfg4 ++sampling.guidance_scale=4.0
+# 10 cut CFG4 long      = #4 + $P ${R}bisect_cfg4_long ++sampling.guidance_scale=4.0  (run to 90)
+```
+
+Failed pre-runs (documented for completeness, no wandb): sglang-engine aligned
+recipe (died on the sglang×true-CFG geometry bug), trainside relaunch on
+diffusers 0.39 (txt_seq_lens TypeError), kernel cut via `strategy._target_=`
+override (Hydra "not in struct" — the trainside recipe keys it under
+`pipeline.strategy`; use the `qwen_image_trainside` recipe instead).
