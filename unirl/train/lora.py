@@ -66,6 +66,7 @@ def inject_lora(
         exclude_modules=normalize_optional_module_selection(exclude_modules),
         bias=str(bias),
         task_type=str(task_type),
+        init_lora_weights="gaussian",  # miles/flow_grpo parity
     )
     inject_adapter_in_model(peft_cfg, model, adapter_name=adapter_name)
 
@@ -94,7 +95,7 @@ def _reset_adapter(model: nn.Module, *, name: str) -> None:
     n_reset = 0
     for m in model.modules():
         if isinstance(m, LoraLayer):
-            m.reset_lora_parameters(name, init_lora_weights=True)
+            m.reset_lora_parameters(name, init_lora_weights="gaussian")  # miles/flow_grpo parity
             n_reset += 1
     if _current_rank() == 0:
         logger.info("_reset_adapter(%r): %d LoraLayer(s)", name, n_reset)

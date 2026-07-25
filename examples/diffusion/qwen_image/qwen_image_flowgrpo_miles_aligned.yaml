@@ -1,0 +1,195 @@
+# @package _global_
+# Qwen-Image FlowGRPO — 1:1 aligned with miles-diffusion
+# scripts/run-diffusion-grpo-pickscore-5gpu-flowgrpo-aligned.sh
+# (flow_grpo `pickscore_qwenimage` lineage).
+#
+# Base: examples/diffusion/qwen_image/qwen_image_sglang.yaml, changed knobs:
+#   batch_size 48→32 (512 items/rollout = 32 prompts x 16 samples)
+#   resolution 384→512, num_inference_steps 12→10
+#   SDE: AllSDEScheduler(3 steps, [0,0.5])→static sde_indices [3,4] (miles
+#     sde_window_range 3,5 → indices [3,4]); eta 0.7→1.2 (noise_level)
+#   guidance 1.0→4.0 true-CFG (negative_prompt " " per recipe header note)
+#   strategy Dance→FlowSDE (flow_grpo kernel)
+#   weight_decay 0→1e-4; old_logp_source replay→rollout (miles anchor parity)
+#   num_rollouts 400; eval_interval 30
+# Deviations (documented, not knob-mappable):
+#   - LoRA init: PEFT default → gaussian via 1-line patch in train/lora.py
+#   - eval runs at train num_inference_steps (10), miles evals at 50
+#   - seed derivation & data shuffle impl differ by framework (same distribution)
+#
+#   4-GPU: CUDA_VISIBLE_DEVICES=0,1,2,3 bash examples/run_experiment_single_node.sh \
+#            diffusion/qwen_image/qwen_image_flowgrpo_miles_aligned num_devices=4
+
+num_devices: 4
+batch_size: 32                # prompts_per_rollout (miles --rollout-batch-size 32)
+adv_use_global_std: true      # miles --globalize-reward-std (+ per-prompt mean = GRPO default)
+num_rollouts: 400             # miles --num-rollout 400
+eval_interval: 30             # miles --eval-interval 30
+
+logging:
+  report_to_wandb: true
+  project_name: ${oc.env:WANDB_PROJECT,unirl-qwen-image-miles-aligned}
+  run_name: ${oc.env:WANDB_RUN_NAME,qwen_image_flowgrpo_miles_aligned}
+  entity: ${oc.env:WANDB_ENTITY,null}
+  tags: ["qwen-image", "flowgrpo", "miles-aligned", "sglang-diffusion"]
+  log_media: true
+  media_max_items: 8
+
+model_config:
+  _target_: unirl.models.qwen_image.config.QwenImagePipelineConfig
+  pretrained_model_ckpt_path: ${oc.env:QWEN_IMAGE_PATH,Qwen/Qwen-Image}
+  model_precision: bf16
+  max_sequence_length: 512
+  shift: 3.0
+  use_lora: true
+  lora_target_modules:
+    - attn.add_k_proj
+    - attn.add_q_proj
+    - attn.add_v_proj
+    - attn.to_add_out
+    - attn.to_k
+    - attn.to_out.0
+    - attn.to_q
+    - attn.to_v
+    # miles configs/qwen_image.py parity: MLP targets (attention-only was flat, run 1jjy6w3z)
+    - img_mlp.net.0.proj
+    - img_mlp.net.2
+    - txt_mlp.net.0.proj
+    - txt_mlp.net.2
+
+# flow_grpo SDE kernel (miles is flowgrpo-aligned; Dance is the DanceGRPO variant)
+strategy:
+  _target_: unirl.sde.kernels.FlowSDEStrategy
+
+bundle:
+  _target_: unirl.models.qwen_image.bundle.QwenImageBundle.from_config
+  config: ${model_config}
+
+pipeline:
+  _target_: unirl.models.qwen_image.pipeline.QwenImagePipeline
+  shift: 3.0
+  autocast_precision: bf16
+  trajectory_precision: bf16
+  logprob_precision: fp32
+  max_sequence_length: 512
+  strategy: ${strategy}
+
+backend:
+  _target_: unirl.train.backend.fsdp.FSDPBackend
+  block_class_names: ["QwenImageTransformerBlock"]
+  trainable_attr: transformer
+  fsdp_cfg:
+    _target_: unirl.train.configs.FSDPConfig
+    param_dtype: bf16          # miles: master fp32 / forward bf16 (mixed_precision)
+    cpu_offload: false
+    mixed_precision: true
+    fsdp_mode: full
+    reshard_after_forward: true
+    activation_checkpointing: true   # miles --gradient-checkpointing
+    use_torch_compile: false
+  optimizer_cfg:
+    _target_: unirl.train.backend.base.OptimizerConfig
+    learning_rate: 3.0e-4      # miles --lr 3e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.999          # miles --adam-beta2 0.999
+    adam_epsilon: 1.0e-8
+    weight_decay: 1.0e-4       # miles --weight-decay 1e-4
+  scheduler_cfg:
+    _target_: unirl.train.backend.base.LrSchedulerConfig
+    type: constant
+    warmup_steps: 0
+    total_steps: 10000
+  lora_cfg:
+    _target_: unirl.train.configs.LoraConfig
+    rank: 64                   # miles --lora-rank 64
+    alpha: 128                 # miles --lora-alpha 128
+    dropout: 0.0
+    bias: none
+    task_type: FEATURE_EXTRACTION
+    target_modules:
+      - attn.add_k_proj
+      - attn.add_q_proj
+      - attn.add_v_proj
+      - attn.to_add_out
+      - attn.to_k
+      - attn.to_out.0
+      - attn.to_q
+      - attn.to_v
+      # miles configs/qwen_image.py parity: MLP targets (attention-only was flat, run 1jjy6w3z)
+      - img_mlp.net.0.proj
+      - img_mlp.net.2
+      - txt_mlp.net.0.proj
+      - txt_mlp.net.2
+
+# Trainside engine (UniRL's reference/parity oracle). The sglang_diffusion
+# path has NO true-CFG precedent (grouped-request geometry breaks with a
+# negative branch — hit live 2026-07-23); trainside QwenImagePipeline carries
+# the validated CFG blend. miles rolls out on sgl-d — engine infra differs by
+# framework anyway; training math is unchanged.
+rollout:
+  _target_: unirl.rollout.engine.trainside.engine.TrainsideRolloutEngine
+  stage_attrs: [diffusion]
+  forward_batch_size: 8        # miles --diffusion-microgroup-size 8
+
+reward:
+  _target_: unirl.reward.service.RewardService
+  backend:
+    _target_: unirl.reward.local.pickscore.PickScoreRewardScorer
+    base_device: cuda
+    config:
+      _target_: unirl.reward.local.pickscore.PickScoreSpec
+      batch_size: 8            # miles --pickscore-batch-size 8
+      device: auto
+      processor_id: laion/CLIP-ViT-H-14-laion2B-s32B-b79K
+      model_id: yuvalkirstain/PickScore_v1
+
+algorithm:
+  _target_: unirl.algorithms.flowgrpo.FlowGRPO
+  stage_attr: diffusion
+  clip_range: 1.0e-4           # miles --diffusion-clip-range 1e-4
+  clip_schedule: constant
+  # beta defaults 0.0 = miles beta=0 (no KL)
+  # rollout anchor: pi_old = engine-emitted logp (miles semantics)
+  old_logp_source: rollout
+  conditions_cls:
+    _target_: hydra.utils.get_class
+    path: unirl.models.qwen_image.conditions.QwenImageConditions
+  params: ${sampling}
+
+stack:
+  _target_: unirl.train.stack.TrainStack
+  micro_batch_size: 4          # 4 samples x 2 SDE steps = 8 cells/forward (miles tile 8x1)
+  max_grad_norm: 1.0           # miles max_grad_norm 1.0
+  num_updates_per_batch: 2     # miles --num-steps-per-rollout 2
+
+data_source:
+  _target_: unirl.data.data_source.MultimodalRLDataSource
+  args:
+    run:
+      data_path: ${oc.env:DATA_PATH,datasets/miles_flowgrpo_pickscore/train.txt}
+      eval_data_path: ${oc.env:EVAL_DATA_PATH,datasets/miles_flowgrpo_pickscore/test.txt}
+      seed: 42                 # miles --rollout-seed default 42
+    algorithm:
+      prompts_per_rollout: ${batch_size}
+
+sampling:
+  _target_: unirl.types.sampling.DiffusionSamplingParams
+  num_inference_steps: 10      # miles --diffusion-num-steps 10
+  guidance_scale: 4.0          # miles --diffusion-true-cfg-scale 4.0
+  height: 512                  # miles --diffusion-height 512
+  width: 512
+  eta: 1.2                     # miles --diffusion-noise-level 1.2
+  samples_per_prompt: 16       # miles --n-samples-per-prompt 16
+  seed: 42
+  init_same_noise: false       # miles same_latent=False
+  autocast_precision: bf16
+  # miles sde_window_range 3,5 -> fixed SDE indices [3,4]; static list
+  # overrides any scheduler (resolve_sde_indices precedence).
+  sde_indices: [3, 4]
+  # true-CFG negative: QwenImagePipeline.encode_prompts auto-fills " " when
+  # guidance_scale > 1 and no negatives are given (single space; empty ""
+  # degenerates after the 34-token chat-template strip).
+
+# Trainside rollout reuses the train model in-process: no weight sync needed
+# (miles syncs LoRA every rollout to its separate sgl-d engine — equivalent
+# freshness, both roll out at the current weights).
