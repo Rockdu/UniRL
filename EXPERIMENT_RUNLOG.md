@@ -20,12 +20,17 @@ Changes on this branch:
 1. **The miles-aligned config does not learn on UniRL** (flat train reward,
    monotonically declining eval), while the same setting climbs on
    miles-diffusion.
-2. Eight-cut bisection localized the trigger: **true-CFG (guidance 4.0)
-   training rises for ~30-45 rollouts then decays below start** — reproduced in
-   3 distinct configs (512²+FlowSDE-triple, 384²+FlowSDE-triple,
-   384²+stock-Dance-SDE). Every no-CFG config climbs and holds (longest 80
-   rollouts). All UniRL official qwen recipes ship guidance 1.0; this regime
-   appears untested upstream.
+2. Eight-cut bisection localized the anomaly: **true-CFG (guidance 4.0)
+   training shows a rise→dip "hump" over rollouts ~30-90** — reproduced in 3
+   distinct configs, while every no-CFG config climbs monotonically.
+   **[REVISED 2026-07-28]** The long-horizon rerun (#10) shows the dip is a
+   TRANSIENT: after ~150 rollouts the CFG run recovers and converges to
+   **0.907 mean / 0.937 max by rollout ~1200** — far above the no-CFG plateau
+   (0.854). UniRL CFG training is NOT broken; it traverses a long hump that
+   short windows (and our 90-rollout verdicts) misread as decay. The remaining
+   miles-vs-UniRL delta is climb DYNAMICS (miles climbs without the hump),
+   not capability. Curve: `cfg4long_curve_rollout1671.txt` (200-window means:
+   0.846 → 0.855 → 0.878 → 0.896 → 0.902 → 0.907 plateau).
 3. Exonerated by experiment: LoRA target scope (attn-8 suffices no-CFG), FlowSDE
    kernel, eta 1.2, static sde_indices [3,4], geometry, engine (trainside used
    throughout), anchor (`old_logp_source: rollout` throughout).
@@ -54,7 +59,7 @@ stock recipe hardcodes its project name).
 | 7 | cut: eta 1.2 | `bisect_flowsde_eta12` | trainside + `++sampling.eta=1.2` | ✓ climbs 0.778→0.832/45 (low start = early-window σ→1 noise blowup, see notes) |
 | 8 | cut: SDE triple | `bisect_sde_triple` | + `"++sampling.sde_indices=[3,4]"` | ✓ climbs 0.806→0.848/23 (short — hump caveat applies) |
 | 9 | cut: triple + CFG4 | `bisect_sde3_cfg4` | + `++sampling.guidance_scale=4.0` | ✗ hump: peak 0.847 @25-36 → 0.836 @73-84 |
-| 10 | cut: CFG4 long rerun | `bisect_cfg4_long` | stock SDE + CFG4, 90 rollouts | ✗ hump: peak 0.852 @37-45 → 0.842 @55-63, clip→0.23 |
+| 10 | cut: CFG4 long rerun | `bisect_cfg4_long` | stock SDE + CFG4, ran to **1671** | hump @37-63, then **recovers: 0.907 mean plateau @1000+, max 0.937** — see REVISED finding 2 |
 
 Launch pattern (single node):
 
@@ -81,13 +86,12 @@ RAY_ADDRESS=127.0.0.1:6379 python -m unirl.train_diffusion \
    sglang recipe exercises guidance>1 (SD3 classic-CFG via PE recipe works).
 2. **diffusers 0.39 breaks Qwen-Image** (`txt_seq_lens` kwarg removed) and the
    uv override `diffusers>=0.38.0` resolves to it. This branch caps `<0.39`.
-3. **true-CFG training regime decays** (headline finding 2) — mechanism not yet
-   isolated; formulas match miles exactly (kernel, blend, norm correction,
-   gradient flow both branches). Leading remaining candidate: negative-embeds
-   content (UniRL trainside self-encodes `" "`; miles consumes sgl-d
-   engine-shipped neg embeds via denoising_env). Next probes: neg-embeds diff;
-   `num_updates_per_batch=1` (does damage require the one-step-off-policy
-   second update).
+3. **[REVISED]** ~~true-CFG training decays~~ → true-CFG training traverses a
+   ~30-150-rollout hump before climbing to a HIGHER plateau than no-CFG
+   (finding 2). Open question downgraded from bug to dynamics: why does miles
+   climb hump-free while UniRL dips first (negative-embeds content and
+   off-policy-second-update interaction remain the candidates). Practical
+   guidance for UniRL CFG users: do not early-stop before ~200 rollouts.
 
 ## Ops notes (shared-node H200 devboxes)
 
