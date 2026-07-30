@@ -60,6 +60,7 @@ stock recipe hardcodes its project name).
 | 8 | cut: SDE triple | `bisect_sde_triple` | + `"++sampling.sde_indices=[3,4]"` | ✓ climbs 0.806→0.848/23 (short — hump caveat applies) |
 | 9 | cut: triple + CFG4 | `bisect_sde3_cfg4` | + `++sampling.guidance_scale=4.0` | ✗ hump: peak 0.847 @25-36 → 0.836 @73-84 |
 | 10 | cut: CFG4 long rerun | `bisect_cfg4_long` | stock SDE + CFG4, ran to **1671** | hump @37-63, then **recovers: 0.907 mean plateau @1000+, max 0.937** — see REVISED finding 2 |
+| 11 | **v3 final aligned run** | [ps7vxpuf](https://wandb.ai/kangrdu/unirl-qwen-image-miles-aligned/runs/ps7vxpuf) | strict 4-GPU, replay anchor, aligned to miles run n4a8wizz; ckpt every 200 to /personal | ✓ **climbs**: hump @78 recovers by 103; 0.846→0.911 by 430; eval 0.8589→0.8911 rising. Stopped at 430 by choice; weights kept: checkpoint-200/400 + `ckpt400_backup_v3_n4a8wizz.tar` (md5 1317af35). **Retro-verdict: v1/v2 "flat" was the hump — they were stopped too early.** |
 
 Launch pattern (single node):
 
